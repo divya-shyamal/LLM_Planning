@@ -1,0 +1,56 @@
+{
+  "os": "Linux-6.1.148-173.267.amzn2023.x86_64-x86_64-with-glibc2.34",
+  "python": "CPython 3.13.9",
+  "startedAt": "2026-05-10T07:51:09.589828Z",
+  "args": [
+    "--data_dir",
+    "data/maze",
+    "--output_dir",
+    "models",
+    "--task",
+    "maze",
+    "--level",
+    "task",
+    "--search_algo",
+    "a_star",
+    "--system",
+    "1.0",
+    "--num_epochs",
+    "3"
+  ],
+  "program": "/home/ec2-user/LLM_Planning/src_maze/train.py",
+  "codePath": "src_maze/train.py",
+  "codePathLocal": "src_maze/train.py",
+  "git": {
+    "remote": "https://github.com/divya-shyamal/LLM_Planning",
+    "commit": "d35508d4fb1c24ec4f06cf839af25285397fd080"
+  },
+  "email": "abhi.gupta@columbia.edu",
+  "root": "/home/ec2-user/LLM_Planning",
+  "host": "ip-172-31-17-11.us-east-2.compute.internal",
+  "executable": "/home/ec2-user/anaconda3/bin/python",
+  "cpu_count": 4,
+  "cpu_count_logical": 8,
+  "gpu": "NVIDIA L40S",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "268355743744",
+      "used": "237125509120"
+    }
+  },
+  "memory": {
+    "total": "66498744320"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA L40S",
+      "memoryTotal": "48305799168",
+      "cudaCores": 18176,
+      "architecture": "Ada",
+      "uuid": "GPU-5d386607-443a-eabc-0aa8-91fa99b2fc7b"
+    }
+  ],
+  "cudaVersion": "12.8",
+  "writerId": "mr55poippprwfu2fx8aj6lsq7wvz5sg7"
+}
