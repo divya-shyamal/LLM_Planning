@@ -26,6 +26,9 @@ from typing import Dict, List, Optional, Tuple
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
+_SRC_MAZE = os.path.join(REPO_ROOT, "src_maze")
+if _SRC_MAZE not in sys.path:
+    sys.path.insert(0, _SRC_MAZE)
 
 import numpy as np
 import torch
@@ -44,6 +47,10 @@ SYS2_DEFAULT = os.path.join(
     REPO_ROOT,
     "models/maze/a_star_obstacles_sliding_task_system_1.0_3200_epoch_3_lr_0.0005_bs_2",
 )
+CONTROLLER_DEFAULT = os.path.join(
+    REPO_ROOT,
+    "models/maze/a_star_obstacles_sliding_sample_system_0.5_3200_epoch_1_lr_0.0005_bs_2",
+)
 
 PROMPT_TEMPLATE = (
     "You are in a 2d maze of dimensions {l} and {w} and some of the cells have walls. "
@@ -52,6 +59,19 @@ PROMPT_TEMPLATE = (
     "sequence of actions. The optimal plan is one that has the minimum number of steps. "
     "The list of permissible actions that you can take at any given cell are {actions}. "
     "The optimal plan from {start} to {goal} is"
+)
+
+# Controller prompt (obstacles variant) — must match what the controller was trained on.
+# Generates the wall list + subgoal decomposition (system 1 / system 2 labels).
+CONTROLLER_PROMPT_TEMPLATE = (
+    "You are in a 2d maze of dimensions {l} and {w} and some of the cells have walls. "
+    "The walls are placed in cells {walls}. "
+    "Given a start and a goal state, your task is to first generate a set of subgoals "
+    "that can then be solved to generate the optimal plan between the states. "
+    "The optimal plan is one that has the minimum number of steps. "
+    "The list of permissible actions that you can take at any given cell are {actions}. "
+    "Generate the subgoals for generating a plan from {start} to {goal}. "
+    "The walls between {start} to {goal} are at"
 )
 
 
@@ -139,6 +159,35 @@ def simulate_trajectory(maze: Maze, start: list, actions: List[str]) -> Tuple[Li
 
 
 # ---------------------------------------------------------------------------
+# Trajectory simulation (subgoal-aware variant for System-1.x)
+# ---------------------------------------------------------------------------
+
+def simulate_trajectory_to_subgoal(
+    maze: Maze,
+    start: list,
+    actions: List[str],
+    subgoal: list,
+) -> Tuple[List[list], List[str]]:
+    """
+    Like simulate_trajectory but also stops when subgoal is reached.
+    Used by run_system1x so that each sub-plan doesn't overshoot the subgoal.
+    """
+    state = list(start)
+    states = [state]
+    valid_actions = []
+    for action in actions:
+        ns = apply_action(maze, state, action)
+        if ns == state:
+            continue
+        states.append(list(ns))
+        valid_actions.append(action)
+        state = list(ns)
+        if state == list(maze.goal) or state == list(subgoal):
+            break
+    return states, valid_actions
+
+
+# ---------------------------------------------------------------------------
 # Model output parsing
 # ---------------------------------------------------------------------------
 
@@ -212,14 +261,18 @@ def generate_batch(
             max_new_tokens=max_new_tokens,
         )
 
-    # output_ids includes input tokens; new tokens = total - padded_input_len
     padded_input_len = inputs["input_ids"].shape[1]
-    tokens_generated = output_ids.shape[1] - padded_input_len  # same for all in batch
+    eos_id = tokenizer.eos_token_id
 
     decoded = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
     outputs = [text[len(prompt):].split("\n")[0].strip() for text, prompt in zip(decoded, prompts)]
 
-    token_stats = [(int(il), int(tokens_generated)) for il in input_lengths]
+    # Per-sample generated token count: exclude EOS and post-EOS padding (matches test.py approach).
+    token_stats = []
+    for i, il in enumerate(input_lengths):
+        gen_portion = output_ids[i, padded_input_len:]
+        n_gen = int((gen_portion != eos_id).sum())
+        token_stats.append((int(il), n_gen))
     return outputs, token_stats
 
 
@@ -306,7 +359,7 @@ def run_smc(
                 state_before_move = list(p.state)
 
                 actions = extract_full_plan_sys1(output) if model_type == "sys1" else extract_full_plan_sys2(output)
-                p.states_explored += 1 if model_type == "sys1" else count_states_sys2(output)
+                p.states_explored += output.count("|") if model_type == "sys1" else output.count("Exploring")
                 p.tokens_input += tok_in
                 p.tokens_generated += tok_gen
 
@@ -382,8 +435,10 @@ def run_smc(
         "valid": valid,
         "optimal": optimal,
         "plan": best.history,
+        "plan_length": len(best.history),
         "states_explored": sum(p.states_explored for p in particles),
         "complete_particles": len(complete),
+        "completion_rate": len(complete) / M,
         "total_tokens_input": sum(p.tokens_input for p in particles),
         "total_tokens_generated": sum(p.tokens_generated for p in particles),
         "per_particle_tokens": [
@@ -412,10 +467,10 @@ def run_single_model(
 
     if model_type == "sys1":
         actions = extract_full_plan_sys1(output)
-        states_explored = len(actions) if actions else 1
+        states_explored = output.count("|")
     else:
         actions = extract_full_plan_sys2(output)
-        states_explored = count_states_sys2(output)
+        states_explored = output.count("Exploring")
 
     plan_str = history_to_plan_str(maze.start, actions)
     valid = maze.is_valid_plan(plan=plan_str, start=maze.start, goal=maze.goal)
@@ -427,6 +482,7 @@ def run_single_model(
         "valid": valid,
         "optimal": optimal,
         "plan": actions,
+        "plan_length": len(actions),
         "states_explored": states_explored,
         "tokens_input": tok_in,
         "tokens_generated": tok_gen,
@@ -487,7 +543,7 @@ def run_smc_fixed_model(
             state_before_move = list(p.state)
 
             actions = extract_full_plan_sys1(output) if model_type == "sys1" else extract_full_plan_sys2(output)
-            p.states_explored += 1 if model_type == "sys1" else count_states_sys2(output)
+            p.states_explored += output.count("|") if model_type == "sys1" else output.count("Exploring")
             p.tokens_input += tok_in
             p.tokens_generated += tok_gen
 
@@ -560,8 +616,10 @@ def run_smc_fixed_model(
         "valid": valid,
         "optimal": optimal,
         "plan": best.history,
+        "plan_length": len(best.history),
         "states_explored": sum(p.states_explored for p in particles),
         "complete_particles": len(complete),
+        "completion_rate": len(complete) / M,
         "total_tokens_input": sum(p.tokens_input for p in particles),
         "total_tokens_generated": sum(p.tokens_generated for p in particles),
         "per_particle_tokens": [
@@ -569,6 +627,113 @@ def run_smc_fixed_model(
             for i, p in enumerate(particles)
         ],
         "steps": step_logs,
+    }
+
+
+# ---------------------------------------------------------------------------
+# System-1.x baseline
+# ---------------------------------------------------------------------------
+
+def run_system1x(
+    maze: Maze,
+    controller_model,
+    sys1_model,
+    sys2_model,
+    tokenizer,
+    args,
+) -> dict:
+    """
+    System-1.x: controller decomposes the problem into easy/hard subgoals,
+    then sys1/sys2 plans each subgoal in sequence.
+
+    Uses decomp_hybrid.parse_meta_plan and get_planner_prompt from the repo
+    so the logic is identical to the original System-1.x evaluation.
+    """
+    from decomp_hybrid import parse_meta_plan, get_planner_prompt
+
+    # 1. Build controller prompt and generate the meta-plan decomposition.
+    ctrl_prompt = CONTROLLER_PROMPT_TEMPLATE.format(
+        l=maze.l,
+        w=maze.w,
+        walls=maze.walls,
+        actions=maze.actions,
+        start=maze.start,
+        goal=maze.goal,
+    )
+    outputs, token_stats = generate_batch(controller_model, tokenizer, [ctrl_prompt], args.max_new_tokens)
+    meta_plan_output = outputs[0]
+    ctrl_tok_in, ctrl_tok_gen = token_stats[0]
+
+    # 2. Parse subgoals — falls back to [(start, goal, 2)] on parse failure.
+    sub_goals = parse_meta_plan(meta_plan_output, maze.start, maze.goal)
+
+    # 3. Execute each subgoal with the assigned model.
+    full_history: List[str] = []
+    total_tokens_input = ctrl_tok_in
+    total_tokens_generated = ctrl_tok_gen
+    total_states_explored = 0
+    current_state = list(maze.start)
+
+    subgoal_log = []
+    for sub_start, sub_goal, system in sub_goals:
+        if current_state == list(maze.goal):
+            break
+
+        model_type = "sys1" if system == 1 else "sys2"
+        model_obj = sys1_model if system == 1 else sys2_model
+
+        # get_planner_prompt uses the same template as training.
+        subgoal_prompt = get_planner_prompt(maze, current_state, sub_goal)
+        sg_outputs, sg_token_stats = generate_batch(model_obj, tokenizer, [subgoal_prompt], args.max_new_tokens)
+        sg_output = sg_outputs[0]
+        tok_in, tok_gen = sg_token_stats[0]
+
+        total_tokens_input += tok_in
+        total_tokens_generated += tok_gen
+
+        if model_type == "sys1":
+            actions = extract_full_plan_sys1(sg_output)
+            total_states_explored += sg_output.count("|")
+        else:
+            actions = extract_full_plan_sys2(sg_output)
+            total_states_explored += sg_output.count("Exploring")
+
+        _, valid_actions = simulate_trajectory_to_subgoal(maze, current_state, actions, sub_goal)
+        full_history.extend(valid_actions)
+
+        prev_state = current_state
+        current_state = maze.follow_plan(current_state, valid_actions)
+
+        subgoal_log.append({
+            "sub_start": sub_start,
+            "sub_goal": sub_goal,
+            "system": system,
+            "model_used": model_type,
+            "state_before": prev_state,
+            "state_after": list(current_state),
+            "actions_taken": valid_actions,
+            "tokens_input": tok_in,
+            "tokens_generated": tok_gen,
+        })
+
+    plan_str = history_to_plan_str(maze.start, full_history)
+    valid = maze.is_valid_plan(plan=plan_str, start=maze.start, goal=maze.goal)
+    optimal = (
+        maze.is_optimal_plan(plan=plan_str, check_validity=False, start=maze.start, goal=maze.goal)
+        if valid else False
+    )
+
+    return {
+        "valid": valid,
+        "optimal": optimal,
+        "plan": full_history,
+        "plan_length": len(full_history),
+        "states_explored": total_states_explored,
+        "total_tokens_input": total_tokens_input,
+        "total_tokens_generated": total_tokens_generated,
+        "meta_plan_raw": meta_plan_output,
+        "sub_goals_parsed": [(str(s), str(g), sys) for s, g, sys in sub_goals],
+        "subgoal_log": subgoal_log,
     }
 
 
@@ -583,14 +748,19 @@ def print_metrics(results: List[dict], label: str) -> None:
     validity = sum(r["valid"] for r in results) / n
     optimality = sum(r["optimal"] for r in results) / n
     avg_states = sum(r["states_explored"] for r in results) / n
-    avg_tok_in = sum(r.get("total_tokens_input", 0) for r in results) / n
-    avg_tok_gen = sum(r.get("total_tokens_generated", 0) for r in results) / n
+    avg_plan_len = sum(r.get("plan_length", 0) for r in results) / n
+    avg_tok_in = sum(r.get("total_tokens_input", r.get("tokens_input", 0)) for r in results) / n
+    avg_tok_gen = sum(r.get("total_tokens_generated", r.get("tokens_generated", 0)) for r in results) / n
     print(f"\n  {label}")
     print(f"    Plan validity:          {validity:.4f}  ({sum(r['valid'] for r in results)}/{n})")
     print(f"    Plan optimality:        {optimality:.4f}  ({sum(r['optimal'] for r in results)}/{n})")
+    print(f"    Avg plan length:        {avg_plan_len:.1f}")
     print(f"    Avg states explored:    {avg_states:.1f}")
     print(f"    Avg tokens input:       {avg_tok_in:.1f}")
     print(f"    Avg tokens generated:   {avg_tok_gen:.1f}")
+    if any("completion_rate" in r for r in results):
+        avg_completion = sum(r["completion_rate"] for r in results) / n
+        print(f"    Avg particle completion:{avg_completion:.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -603,10 +773,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--sys1_model", default=SYS1_DEFAULT)
     parser.add_argument("--sys2_model", default=SYS2_DEFAULT)
+    parser.add_argument("--controller_model", default=CONTROLLER_DEFAULT)
     parser.add_argument("--cache_dir", default=os.path.join(REPO_ROOT, "cache"))
     parser.add_argument("--data_dir", default=os.path.join(REPO_ROOT, "data", "maze"))
     parser.add_argument("--output_dir", default=os.path.join(REPO_ROOT, "output"))
-    parser.add_argument("--n_test", type=int, default=-1)
+    parser.add_argument("--n_test", type=int, default=50)
     parser.add_argument("--M", type=int, default=10)
     parser.add_argument("--Tmax", type=int, default=16)
     parser.add_argument("--epsilon", type=float, default=0.15)
@@ -663,6 +834,19 @@ def main() -> None:
     sys2_model = sys2_model.to("cuda")
     sys2_model.eval()
 
+    controller_model = None
+    if os.path.isdir(args.controller_model):
+        print("Loading Controller model ...")
+        base_model_ctrl = AutoModelForCausalLM.from_pretrained(
+            "mistralai/Mistral-7B-Instruct-v0.2", cache_dir=args.cache_dir, torch_dtype=torch.float16
+        )
+        base_model_ctrl.resize_token_embeddings(len(tokenizer), mean_resizing=False)
+        controller_model = PeftModel.from_pretrained(base_model_ctrl, args.controller_model)
+        controller_model = controller_model.to("cuda")
+        controller_model.eval()
+    else:
+        print(f"WARNING: Controller model not found at {args.controller_model} — skipping System-1.x baseline.")
+
     test_path = os.path.join(args.data_dir, "test.json")
     with open(test_path) as f:
         raw = json.load(f)
@@ -683,8 +867,10 @@ def main() -> None:
 
     smc_results: List[dict] = []
     single_sys1_results: List[dict] = []
+    single_sys2_results: List[dict] = []
     smc_sys1_results: List[dict] = []
     smc_sys2_results: List[dict] = []
+    sys1x_results: List[dict] = []
 
     output_path = os.path.join(args.output_dir, "smc_results.json")
 
@@ -716,6 +902,11 @@ def main() -> None:
             r_s1.update(maze_meta)
             single_sys1_results.append(r_s1)
 
+            # Single System-2
+            r_s2 = run_single_model(maze, sys2_model, tokenizer, "sys2", args)
+            r_s2.update(maze_meta)
+            single_sys2_results.append(r_s2)
+
             # SMC all-System-1
             r_smc_s1 = run_smc_fixed_model(maze, sys1_model, tokenizer, "sys1", args, rng)
             r_smc_s1.update(maze_meta)
@@ -727,8 +918,16 @@ def main() -> None:
             smc_sys2_results.append(r_smc_s2)
 
             print(f"         Single-S1   valid={r_s1['valid']}  tok_gen={r_s1['tokens_generated']}")
+            print(f"         Single-S2   valid={r_s2['valid']}  tok_gen={r_s2['tokens_generated']}")
             print(f"         SMC-S1      valid={r_smc_s1['valid']}  tok_gen={r_smc_s1['total_tokens_generated']}")
             print(f"         SMC-S2      valid={r_smc_s2['valid']}  tok_gen={r_smc_s2['total_tokens_generated']}")
+
+        if controller_model is not None:
+            r_sys1x = run_system1x(maze, controller_model, sys1_model, sys2_model, tokenizer, args)
+            r_sys1x.update(maze_meta)
+            sys1x_results.append(r_sys1x)
+            print(f"         System-1.x  valid={r_sys1x['valid']}  optimal={r_sys1x['optimal']}  "
+                  f"states={r_sys1x['states_explored']}  tok_gen={r_sys1x['total_tokens_generated']}")
 
         # Incremental save
         checkpoint = {
@@ -737,8 +936,11 @@ def main() -> None:
         }
         if not args.no_baselines:
             checkpoint["single_sys1"] = single_sys1_results
+            checkpoint["single_sys2"] = single_sys2_results
             checkpoint["smc_all_sys1"] = smc_sys1_results
             checkpoint["smc_all_sys2"] = smc_sys2_results
+        if sys1x_results:
+            checkpoint["system1x"] = sys1x_results
 
         with open(output_path, "w") as f:
             json.dump(checkpoint, f, indent=2)
@@ -749,8 +951,11 @@ def main() -> None:
     print_metrics(smc_results, f"SMC (M={args.M}, ε={args.epsilon}, C={args.C})  [our method]")
     if not args.no_baselines:
         print_metrics(single_sys1_results, "Single System-1  (1 greedy pass)")
+        print_metrics(single_sys2_results, "Single System-2  (1 greedy pass)")
         print_metrics(smc_sys1_results, f"SMC all-System-1 (M={args.M} particles, no switching)")
         print_metrics(smc_sys2_results, f"SMC all-System-2 (M={args.M} particles, no switching)")
+    if sys1x_results:
+        print_metrics(sys1x_results, "System-1.x  (controller + sys1/sys2 subgoals)")
     print(f"\nFull results written to: {output_path}")
 
 
