@@ -164,7 +164,9 @@ def select_system2_plan(args, sample):
 
 
 def prepare_prompts_sample_level(args, file, start = 0, end = -1):
-    output_file = open(os.path.join('/nas-hdd/swarna/projects/Learning2Plan/data/maze_sample_level', args.decomp_style + '_' + args.method + '_' + file), 'w')
+    sample_level_dir = os.path.join(args.data_dir, 'sample_level')
+    os.makedirs(sample_level_dir, exist_ok=True)
+    output_file = open(os.path.join(sample_level_dir, args.decomp_style + '_' + args.method + '_' + file), 'w')
 
     meta_prompt_with_manhattan_wrapper, meta_prompt_with_obstacles_wrapper, _ = define_prompt()
 
