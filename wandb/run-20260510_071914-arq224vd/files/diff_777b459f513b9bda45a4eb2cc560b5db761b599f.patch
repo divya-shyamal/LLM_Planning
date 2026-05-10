@@ -1,0 +1,104 @@
+diff --git a/src_maze/train.py b/src_maze/train.py
+index c03fa1a..74e16e2 100644
+--- a/src_maze/train.py
++++ b/src_maze/train.py
+@@ -7,18 +7,16 @@ from peft import (
+         get_peft_model,
+         LoraConfig
+     )
+-from trl import SFTTrainer
++from trl import SFTTrainer, SFTConfig
+ from datasets import Dataset
+ import numpy as np
+ 
+ import data_utils
+ 
+ def formatting_func(prompt):
+-    output = []
+-    for instruction, plan in zip(prompt['prompt'], prompt['plan']):
+-        output.append(instruction + ' ' + plan + ' ' + '</s>')
++    return prompt['prompt'] + ' ' + prompt['plan'] + ' ' + '</s>'
++
+ 
+-    return output
+ 
+ if __name__ == '__main__':
+     parser = argparse.ArgumentParser()
+@@ -59,6 +57,9 @@ if __name__ == '__main__':
+     data_val = Dataset.from_list(data_val)
+     data_test = Dataset.from_list(data_test)
+ 
++    data_train = data_train.map(lambda x: {"text": x['prompt'] + ' ' + x['plan'] + ' </s>'}).remove_columns(['prompt', 'plan'])
++    data_val = data_val.map(lambda x: {"text": x['prompt'] + ' ' + x['plan'] + ' </s>'}).remove_columns(['prompt', 'plan'])
++
+     print(data_train[0])
+ 
+     access_token = ""
+@@ -86,32 +87,33 @@ if __name__ == '__main__':
+         task_type="CAUSAL_LM",
+     )
+ 
+-    model = get_peft_model(model, lora_config)
++    #model = get_peft_model(model, lora_config)
+ 
+     finetuned_model_name = f"{args.task}/{args.search_algo}_{args.method}_{args.decomp_style}_{args.level}_system_{args.system}_{len(data_train)}_epoch_{args.num_epochs}_lr_{args.learning_rate}_bs_{args.per_device_train_batch_size}"
+     output_dir = os.path.join(args.output_dir, finetuned_model_name)
+     os.makedirs(os.path.dirname(output_dir), exist_ok=True)
+ 
+-    training_args = transformers.TrainingArguments(
+-            output_dir=output_dir,
+-            per_device_train_batch_size=args.per_device_train_batch_size,
+-            gradient_accumulation_steps=args.gradient_accumulation_steps,
+-            optim="paged_adamw_32bit",
+-            evaluation_strategy="epoch",
+-            num_train_epochs=args.num_epochs,
+-            learning_rate=args.learning_rate,
+-            logging_steps=args.logging_steps,
+-            max_grad_norm=args.max_grad_norm,
+-            warmup_ratio=args.warmup_ratio,
+-            group_by_length=False,
+-            lr_scheduler_type="constant",
+-            ddp_find_unused_parameters=False,
+-            eval_accumulation_steps=args.eval_accumulation_steps,
+-            per_device_eval_batch_size=args.per_device_eval_batch_size,
+-            save_strategy="epoch",
+-            save_total_limit = 1,
+-            load_best_model_at_end = True
+-        )
++    training_args = SFTConfig(
++        output_dir=output_dir,
++        per_device_train_batch_size=args.per_device_train_batch_size,
++        gradient_accumulation_steps=args.gradient_accumulation_steps,
++        optim="paged_adamw_32bit",
++        eval_strategy="epoch",
++        num_train_epochs=args.num_epochs,
++        learning_rate=args.learning_rate,
++        logging_steps=args.logging_steps,
++        max_grad_norm=args.max_grad_norm,
++        warmup_ratio=args.warmup_ratio,
++        group_by_length=False,
++        lr_scheduler_type="constant",
++        ddp_find_unused_parameters=False,
++        eval_accumulation_steps=args.eval_accumulation_steps,
++        per_device_eval_batch_size=args.per_device_eval_batch_size,
++        save_strategy="epoch",
++        save_total_limit=1,
++        load_best_model_at_end=True,
++        max_length=args.max_seq_length,  # moved here
++    )
+     
+     print(finetuned_model_name)
+ 
+@@ -120,9 +122,9 @@ if __name__ == '__main__':
+         train_dataset=data_train,
+         eval_dataset=data_val,
+         peft_config=lora_config,
+-        formatting_func=formatting_func,
+-        max_seq_length=args.max_seq_length,
+-        tokenizer=tokenizer,
++        #formatting_func=formatting_func,
++        #max_seq_length=args.max_seq_length,
++        #tokenizer=tokenizer,
+         args=training_args
+     )
+ 
