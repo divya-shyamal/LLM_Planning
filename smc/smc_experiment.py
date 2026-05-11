@@ -31,7 +31,7 @@ if _SRC_MAZE not in sys.path:
     sys.path.insert(0, _SRC_MAZE)
 
 try:
-    from smc.config import WEBHOOK
+    from config import WEBHOOK
 except ImportError:
     WEBHOOK = None
 
@@ -44,13 +44,14 @@ from tasks.maze import Maze
 def notify(msg):
     if not WEBHOOK:
         return
-    import urllib.request
-    payload = json.dumps({"content": f"```\n{msg}\n```"}).encode()
-    req = urllib.request.Request(WEBHOOK, payload, {"Content-Type": "application/json"})
-    try:
-        urllib.request.urlopen(req)
-    except Exception as e:
-        print(f"[webhook error] {e}")
+    import subprocess
+    payload = json.dumps({"content": msg})
+    subprocess.run([
+        "curl", "-s",
+        "-H", "Content-Type: application/json",
+        "-d", payload,
+        WEBHOOK
+    ], capture_output=True)
 
 # ---------------------------------------------------------------------------
 # Canonical model paths
