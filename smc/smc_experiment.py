@@ -291,6 +291,27 @@ def _normalized_weights(particles: List[Particle]) -> np.ndarray:
 # Core SMC particle filter
 # ---------------------------------------------------------------------------
 
+def systematic_resample(
+    particles: List[Particle],
+    active_idxs: List[int],
+    rng: np.random.Generator,
+) -> None:
+    log_ws = np.array([particles[i].log_weight for i in active_idxs], dtype=np.float64)
+    log_ws -= log_ws.max()
+    ws = np.exp(log_ws)
+    ws /= ws.sum()
+
+    M = len(active_idxs)
+    positions = (rng.random() + np.arange(M)) / M
+    cumsum = np.cumsum(ws)
+    chosen = np.searchsorted(cumsum, positions)
+
+    new_particles = [copy.deepcopy(particles[active_idxs[j]]) for j in chosen]
+    for p in new_particles:
+        p.log_weight = 0.0
+    for j, i in enumerate(active_idxs):
+        particles[i] = new_particles[j]
+
 def run_smc(
     maze: Maze,
     sys1_model,
@@ -413,6 +434,10 @@ def run_smc(
                 })
 
         step_logs.append({"step": _t, "particles": step_particle_logs})
+
+        active_idxs = [i for i, p in enumerate(particles) if not p.complete]
+        if len(active_idxs) > 1:
+            systematic_resample(particles, active_idxs, rng)
 
     complete = [p for p in particles if p.complete]
     if complete:
@@ -872,7 +897,9 @@ def main() -> None:
     smc_sys2_results: List[dict] = []
     sys1x_results: List[dict] = []
 
-    output_path = os.path.join(args.output_dir, "smc_results.json")
+    from datetime import datetime
+    run_id = datetime.now().strftime("%Y%m%d_%H")
+    output_path = os.path.join(args.output_dir, f"smc_results_{run_id}.json")
 
     for idx, maze in enumerate(mazes):
         plan_len = len(maze.system1_plan.split(" | ")) - 1
